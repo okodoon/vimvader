@@ -148,15 +148,24 @@ function spawnWave() {
   const { W } = getSize();
   if (designs.length === 0) return;
 
-  const count   = Math.min(3, designs.length > 1 ? 3 : 1);
-  const spacing = Math.floor(W / (count + 1));
+  // Count: 1〜5体（ウェーブごとにランダム、デザイン数も考慮）
+  const maxCount = Math.min(5, designs.length > 0 ? 5 : 1);
+  const count    = 1 + Math.floor(Math.random() * maxCount);
 
-  invDir = 1;
-  for (let i = 0; i < count; i++) {
-    const design  = designs[Math.floor(Math.random() * designs.length)];
-    const enemyW  = (design.cols - 1) * CELL_GAP + 1;
-    const ex      = Math.max(1, spacing * (i + 1) - Math.floor(enemyW / 2));
-    const ey      = HUD_TOP + 2;
+  // 横位置: 画面を等分したスロットをシャッフルして配置
+  const slots    = Math.max(count, 5);
+  const slotW    = Math.floor(W / slots);
+  const indices  = Array.from({ length: slots }, (_, i) => i)
+    .sort(() => Math.random() - 0.5)
+    .slice(0, count);
+
+  invDir = Math.random() < 0.5 ? 1 : -1;  // 動く方向もランダム
+
+  for (const idx of indices) {
+    const design = designs[Math.floor(Math.random() * designs.length)];
+    const enemyW = (design.cols - 1) * CELL_GAP + 1;
+    const ex     = Math.max(1, Math.min(W - enemyW, slotW * idx + Math.floor(slotW / 2) - Math.floor(enemyW / 2)));
+    const ey     = HUD_TOP + 2;
     enemies.push(createEnemy(ex, ey, design));
   }
 }
