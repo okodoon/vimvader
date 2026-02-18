@@ -116,6 +116,7 @@ let enemies  = [];
 let bullets  = [];
 let player   = { x: 40, y: 20 };
 let lastShot = '';
+let cmdBuf   = '';   // コマンドラインバッファ（:q 入力用）
 
 function getSize() {
   return { W: process.stdout.columns || 80, H: process.stdout.rows || 24 };
@@ -181,6 +182,7 @@ function initGame() {
   gameOver = false;
   gameOverMsg = '';
   lastShot = '';
+  cmdBuf   = '';
   spawnWave();
 }
 
@@ -245,9 +247,15 @@ function render() {
   buf.push(ansi.moveTo(player.y, player.x) + ansi.bold(ansi.color('34', PLAYER_CHAR)));
 
   // Bottom HUD
-  const help = mode === 'NORMAL'
-    ? 'h/j/k/l: Move  i: Insert  q: Quit'
-    : `Type to shoot${lastShot ? `  last:'${lastShot}'` : ''}  ESC: Normal`;
+  let help;
+  if (cmdBuf !== '') {
+    // コマンドラインモード表示（Vimっぽく下部に）
+    help = cmdBuf + '█';
+  } else if (mode === 'NORMAL') {
+    help = 'h/j/k/l: Move  i: Insert  :q: Quit';
+  } else {
+    help = `Type to shoot${lastShot ? `  last:'${lastShot}'` : ''}  ESC: Normal`;
+  }
   buf.push(ansi.moveTo(H - 1, 1) + ansi.color('33', help.slice(0, W)));
 
   // Legend
@@ -370,7 +378,21 @@ function handleInput(data) {
   const fieldTop = HUD_TOP + 1;
   const fieldBot = H - HUD_BOT - 1;
 
-  if (gameOver) { if (data === 'q') cleanup(); return; }
+  if (gameOver) { if (data === ':') { cmdBuf = ':'; } else if (cmdBuf === ':' && data === 'q') { cleanup(); } else { cmdBuf = ''; } return; }
+
+  // コマンドラインモード中（: を押した後）
+  if (cmdBuf !== '') {
+    if (data === '\x1b' || data === '\r') {
+      cmdBuf = '';  // ESC or Enter でキャンセル
+    } else if (data === '\x7f') {
+      cmdBuf = cmdBuf.slice(0, -1);  // Backspace
+    } else {
+      cmdBuf += data;
+      if (cmdBuf === ':q') cleanup();
+      // 不正なコマンドはEnter待ち or ESCで消える
+    }
+    return;
+  }
 
   if (mode === 'NORMAL') {
     switch (data) {
@@ -379,7 +401,7 @@ function handleInput(data) {
       case 'k': player.y = Math.max(fieldTop, player.y - 1); break;
       case 'j': player.y = Math.min(fieldBot, player.y + 1); break;
       case 'i': mode = 'INSERT'; break;
-      case 'q': cleanup(); break;
+      case ':': cmdBuf = ':'; break;  // コマンドモード開始
     }
   } else {
     if (data === '\x1b') {
