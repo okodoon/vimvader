@@ -1,0 +1,9 @@
+name: Cross
+author: okodoon
+
+# Cross-shaped enemy — core is exposed but surrounded by arms
+# Shoot through the arms to reach v
+
+. z .
+z v z
+. z .

@@ -1,0 +1,9 @@
+name: Basic
+author: okodoon
+
+# Classic 3x3 invader
+# Shell of random letters, v core in center
+
+a * b
+* v *
+c * d

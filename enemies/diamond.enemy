@@ -1,0 +1,10 @@
+name: Diamond
+author: okodoon
+
+# Diamond shape — exposed flanks, letters on top/bottom
+
+. . x . .
+. x * x .
+x * v * x
+. x * x .
+. . x . .

@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 'use strict';
 
+const fs   = require('fs');
+const path = require('path');
+
 // ── ANSI helpers ──────────────────────────────────────────────────────────────
 const ESC = '\x1b';
 const CSI = ESC + '[';
@@ -11,93 +14,150 @@ const ansi = {
   hideCursor: () => CSI + '?25l',
   showCursor: () => CSI + '?25h',
   bold:       (s) => `${CSI}1m${s}${CSI}0m`,
-  dim:        (s) => `${CSI}2m${s}${CSI}0m`,
   color:      (code, s) => `${CSI}${code}m${s}${CSI}0m`,
 };
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-const PLAYER_CHAR = '▲';
-const CORE_CHAR   = 'v';   // 'v' = vulnerable core, match with 'v' bullet
-const BLOCK_CHAR  = '■';   // any bullet destroys this
-const CELL_GAP    = 2;     // column stride between cells (cells at x, x+2, x+4...)
-const ENEMY_COLS  = 3;
-const ENEMY_ROWS  = 3;
-const ENEMY_W     = (ENEMY_COLS - 1) * CELL_GAP + 1; // visual width = 5
-
-const HUD_TOP     = 1;
-const HUD_BOT     = 1;
-const FPS         = 15;
-const FRAME_MS    = 1000 / FPS;
-const H_MOVE_FRAMES = 8;   // frames between horizontal enemy moves
-const V_DROP_ROWS   = 1;   // rows to drop when hitting wall
-
-// Character pool for enemy armour cells (no 'v')
-const CHAR_POOL = 'abcdefghijklmnopqrstuwxyz';  // 'v' intentionally absent
-function randChar() {
-  return CHAR_POOL[Math.floor(Math.random() * CHAR_POOL.length)];
-}
-
-// ── Enemy factory ─────────────────────────────────────────────────────────────
+// ── Enemy design loader ───────────────────────────────────────────────────────
 //
-//  Enemy layout (3×3):
-//    col  0   2   4
-//  row 0: [A] [■] [B]
-//  row 1: [■] [v] [■]   ← v is the core
-//  row 2: [C] [■] [D]
+//  Place .enemy files in the enemies/ directory (or pass --enemies <dir>).
 //
-//  Shoot matching char to remove char cells.
-//  Shoot anything  to remove ■ cells.
-//  Shoot 'v'       to kill the enemy instantly.
+//  File format:
+//    # comment lines start with #
+//    name: My Enemy      ← optional display name
+//    author: yourname    ← optional
+//    (blank lines ignored)
+//    . * .               ← grid rows: space-separated tokens
+//    * v *
+//    . * .
 //
-function createEnemy(ex, ey) {
-  const cells = [];
-  for (let r = 0; r < ENEMY_ROWS; r++) {
-    cells[r] = [];
-    for (let c = 0; c < ENEMY_COLS; c++) {
-      if (r === Math.floor(ENEMY_ROWS / 2) && c === Math.floor(ENEMY_COLS / 2)) {
-        // Core
-        cells[r][c] = { type: 'core', ch: CORE_CHAR, alive: true };
-      } else {
-        // Randomly assign ■ or a letter
-        const isBlock = Math.random() < 0.45;
-        cells[r][c] = isBlock
-          ? { type: 'block', ch: BLOCK_CHAR, alive: true }
-          : { type: 'char',  ch: randChar(), alive: true };
-      }
-    }
+//  Token meanings:
+//    v        → core   (red)  shoot 'v' to kill the enemy
+//    * or ■   → block  (gray) any character destroys it
+//    a-z, A-Z → char   (yellow) must shoot the SAME character
+//    .        → empty  (no cell)
+//
+//  Rules:
+//    • Must contain exactly one 'v' (the core).
+//    • Grid can be any size.
+//    • Rows don't need to be the same length (short rows are padded with empty).
+
+const CORE_CHAR  = 'v';
+const BLOCK_SYMS = new Set(['*', '■', '#']);
+
+function parseDesignFile(filepath) {
+  const src   = fs.readFileSync(filepath, 'utf8');
+  const lines = src.split('\n');
+
+  const meta  = { name: path.basename(filepath, path.extname(filepath)), author: '' };
+  const grid  = [];
+
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    if (!line || line.startsWith('#')) continue;
+
+    const lower = line.toLowerCase();
+    if (lower.startsWith('name:'))   { meta.name   = line.slice(5).trim(); continue; }
+    if (lower.startsWith('author:')) { meta.author = line.slice(7).trim(); continue; }
+
+    // Grid row — split by whitespace
+    const tokens = line.trim().split(/\s+/);
+    grid.push(tokens);
   }
-  return { x: ex, y: ey, cells, alive: true };
+
+  if (grid.length === 0) return null;
+
+  // Validate: must have exactly one 'v'
+  const coreCount = grid.flat().filter(t => t.toLowerCase() === CORE_CHAR).length;
+  if (coreCount !== 1) return null;
+
+  const cols = Math.max(...grid.map(r => r.length));
+  const rows = grid.length;
+
+  return { ...meta, grid, rows, cols, filepath };
 }
+
+function loadDesigns(dir) {
+  if (!fs.existsSync(dir)) return [];
+
+  return fs.readdirSync(dir)
+    .filter(f => /\.(enemy|txt)$/i.test(f))
+    .sort()
+    .flatMap(f => {
+      try {
+        const d = parseDesignFile(path.join(dir, f));
+        return d ? [d] : [];
+      } catch { return []; }
+    });
+}
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+const CELL_GAP      = 2;   // terminal columns between cells
+const HUD_TOP       = 1;
+const HUD_BOT       = 2;
+const FPS           = 15;
+const FRAME_MS      = 1000 / FPS;
+const H_MOVE_FRAMES = 8;
+const PLAYER_CHAR   = '▲';
+
+// CLI: --enemies <dir>
+const args        = process.argv.slice(2);
+const edIdx       = args.indexOf('--enemies');
+const ENEMIES_DIR = edIdx >= 0 ? path.resolve(args[edIdx + 1]) : path.join(__dirname, 'enemies');
 
 // ── State ─────────────────────────────────────────────────────────────────────
-let mode        = 'NORMAL';
-let score       = 0;
-let frame       = 0;
-let gameOver    = false;
+let designs  = [];
+let mode     = 'NORMAL';
+let score    = 0;
+let frame    = 0;
+let gameOver = false;
 let gameOverMsg = '';
-let invDir      = 1;   // +1 = right, -1 = left
-let enemies     = [];
-let bullets     = [];  // { x, y, ch }
-let player      = { x: 40, y: 20 };
-let lastShot    = '';  // last char typed (for HUD hint)
+let invDir   = 1;
+let enemies  = [];
+let bullets  = [];
+let player   = { x: 40, y: 20 };
+let lastShot = '';
 
 function getSize() {
+  return { W: process.stdout.columns || 80, H: process.stdout.rows || 24 };
+}
+
+// ── Enemy factory from design ─────────────────────────────────────────────────
+function createEnemy(ex, ey, design) {
+  const cells = design.grid.map(row =>
+    row.map(token => {
+      const t = token;
+      if (t === '.')                              return { type: 'empty', ch: ' ',   alive: false };
+      if (BLOCK_SYMS.has(t))                     return { type: 'block', ch: '■',   alive: true  };
+      if (t.toLowerCase() === CORE_CHAR)         return { type: 'core',  ch: CORE_CHAR, alive: true };
+      if (/^[a-zA-Z]$/.test(t))                 return { type: 'char',  ch: t.toLowerCase(), alive: true };
+      return { type: 'empty', ch: ' ', alive: false };
+    })
+  );
   return {
-    W: process.stdout.columns || 80,
-    H: process.stdout.rows    || 24,
+    x: ex, y: ey,
+    rows: design.rows,
+    cols: design.cols,
+    cells,
+    alive: true,
+    name: design.name,
   };
 }
 
-// ── Wave ──────────────────────────────────────────────────────────────────────
+// ── Wave spawner ──────────────────────────────────────────────────────────────
 function spawnWave() {
   const { W } = getSize();
-  const count   = 3;
+  if (designs.length === 0) return;
+
+  const count   = Math.min(3, designs.length > 1 ? 3 : 1);
   const spacing = Math.floor(W / (count + 1));
+
   invDir = 1;
   for (let i = 0; i < count; i++) {
-    const ex = spacing * (i + 1) - Math.floor(ENEMY_W / 2);
-    const ey = HUD_TOP + 2;
-    enemies.push(createEnemy(ex, ey));
+    const design  = designs[Math.floor(Math.random() * designs.length)];
+    const enemyW  = (design.cols - 1) * CELL_GAP + 1;
+    const ex      = Math.max(1, spacing * (i + 1) - Math.floor(enemyW / 2));
+    const ey      = HUD_TOP + 2;
+    enemies.push(createEnemy(ex, ey, design));
   }
 }
 
@@ -123,76 +183,82 @@ function render() {
   buf.length = 0;
   buf.push(ansi.home());
 
-  // ── Top HUD
-  const modeStr = mode === 'NORMAL' ? ansi.color('36', '[NORMAL]') : ansi.color('35', '[INSERT]');
-  const hudL = `VIMVADER  Score: ${String(score).padStart(6, ' ')}`;
-  const gap  = Math.max(1, W - hudL.length - 10);
-  buf.push(ansi.moveTo(1, 1) + ansi.bold(ansi.color('36', '── ')) +
-           ansi.bold(hudL) +
-           ' '.repeat(gap) + modeStr +
-           ansi.bold(ansi.color('36', ' ──')));
+  // Top HUD
+  const modeStr = mode === 'NORMAL'
+    ? ansi.bold(ansi.color('36', '[NORMAL]'))
+    : ansi.bold(ansi.color('35', '[INSERT]'));
+  const hudL   = `VIMVADER  Score: ${String(score).padStart(6)}`;
+  const gapLen = Math.max(1, W - hudL.length - 12);
+  buf.push(
+    ansi.moveTo(1, 1) +
+    ansi.bold(ansi.color('36', '── ')) +
+    ansi.bold(hudL) +
+    ' '.repeat(gapLen) + modeStr +
+    ansi.bold(ansi.color('36', ' ──'))
+  );
 
-  // ── Clear field
+  // Clear field
   const fieldTop = HUD_TOP + 1;
   const fieldBot = H - HUD_BOT - 1;
   for (let r = fieldTop; r <= fieldBot; r++) {
     buf.push(ansi.moveTo(r, 1) + ' '.repeat(W));
   }
 
-  // ── Enemies
+  // Enemies
   for (const enemy of enemies) {
     if (!enemy.alive) continue;
-    for (let r = 0; r < ENEMY_ROWS; r++) {
-      for (let c = 0; c < ENEMY_COLS; c++) {
-        const cell = enemy.cells[r][c];
-        if (!cell.alive) continue;
+    for (let r = 0; r < enemy.rows; r++) {
+      const row = enemy.cells[r];
+      if (!row) continue;
+      for (let c = 0; c < row.length; c++) {
+        const cell = row[c];
+        if (!cell || !cell.alive) continue;
         const sx = enemy.x + c * CELL_GAP;
         const sy = enemy.y + r;
         if (sy < fieldTop || sy > fieldBot || sx < 1 || sx > W) continue;
         let ch;
-        if (cell.type === 'core') {
-          ch = ansi.bold(ansi.color('31', cell.ch));   // red bold  ← shoot 'v' here!
-        } else if (cell.type === 'block') {
-          ch = ansi.color('90', cell.ch);              // dark gray ← any char works
-        } else {
-          ch = ansi.color('33', cell.ch);              // yellow    ← need matching char
-        }
+        if      (cell.type === 'core')  ch = ansi.bold(ansi.color('31', cell.ch));
+        else if (cell.type === 'block') ch = ansi.color('90', cell.ch);
+        else                            ch = ansi.color('33', cell.ch);
         buf.push(ansi.moveTo(sy, sx) + ch);
       }
     }
   }
 
-  // ── Bullets
+  // Bullets
   for (const b of bullets) {
     if (b.y >= fieldTop && b.y <= fieldBot && b.x >= 1 && b.x <= W) {
       buf.push(ansi.moveTo(b.y, b.x) + ansi.color('32', b.ch));
     }
   }
 
-  // ── Player
+  // Player
   buf.push(ansi.moveTo(player.y, player.x) + ansi.bold(ansi.color('34', PLAYER_CHAR)));
 
-  // ── Bottom HUD
-  let help;
-  if (mode === 'NORMAL') {
-    help = ' h/j/k/l: Move  i: Insert  q: Quit ';
-  } else {
-    const hint = lastShot ? `  last: '${lastShot}'` : '';
-    help = ` Type to shoot (■=any  letter=match  v=core)${hint}  ESC: Normal `;
-  }
-  buf.push(ansi.moveTo(H - 1, 1) + ansi.color('33', help.slice(0, W).padEnd(W)));
+  // Bottom HUD
+  const help = mode === 'NORMAL'
+    ? 'h/j/k/l: Move  i: Insert  q: Quit'
+    : `Type to shoot${lastShot ? `  last:'${lastShot}'` : ''}  ESC: Normal`;
+  buf.push(ansi.moveTo(H - 1, 1) + ansi.color('33', help.slice(0, W)));
 
-  // ── Legend (bottom row)
-  const legend = `  ${ansi.color('90', '■')} any  ${ansi.color('33', 'A')} match char  ${ansi.bold(ansi.color('31', 'v'))} core → kill  `;
+  // Legend
+  const legend = `  ${ansi.color('90', '■')} any  ${ansi.color('33', 'a')} match char  ${ansi.bold(ansi.color('31', 'v'))} core (kill)`;
   buf.push(ansi.moveTo(H, 1) + legend);
 
-  // ── Game over overlay
+  // No designs warning
+  if (designs.length === 0) {
+    const warn = `[No enemy files in ${ENEMIES_DIR}]`;
+    buf.push(ansi.moveTo(Math.floor(H / 2), Math.floor((W - warn.length) / 2)) +
+             ansi.bold(ansi.color('31', warn)));
+  }
+
+  // Game over
   if (gameOver) {
     const m1 = gameOverMsg;
-    const m2 = `Score: ${score}  ─  Press q to quit`;
-    buf.push(ansi.moveTo(Math.floor(H / 2),     Math.floor((W - m1.length) / 2) + 1) +
+    const m2 = `Score: ${score}  ─  q to quit`;
+    buf.push(ansi.moveTo(Math.floor(H / 2),     Math.floor((W - m1.length) / 2)) +
              ansi.bold(ansi.color('31', m1)));
-    buf.push(ansi.moveTo(Math.floor(H / 2) + 1, Math.floor((W - m2.length) / 2) + 1) +
+    buf.push(ansi.moveTo(Math.floor(H / 2) + 1, Math.floor((W - m2.length) / 2)) +
              ansi.bold(ansi.color('33', m2)));
   }
 
@@ -200,39 +266,36 @@ function render() {
 }
 
 // ── Collision ─────────────────────────────────────────────────────────────────
-// Returns true if bullet was consumed (hit something)
 function hitTest(b) {
   for (const enemy of enemies) {
     if (!enemy.alive) continue;
-    for (let r = 0; r < ENEMY_ROWS; r++) {
-      for (let c = 0; c < ENEMY_COLS; c++) {
-        const cell = enemy.cells[r][c];
-        if (!cell.alive) continue;
+    for (let r = 0; r < enemy.rows; r++) {
+      const row = enemy.cells[r];
+      if (!row) continue;
+      for (let c = 0; c < row.length; c++) {
+        const cell = row[c];
+        if (!cell || !cell.alive) continue;
         const cx = enemy.x + c * CELL_GAP;
         const cy = enemy.y + r;
         if (b.x !== cx || b.y !== cy) continue;
 
-        // Hit!
         if (cell.type === 'block') {
-          // ■ — any char destroys it
           cell.alive = false;
           score += 5;
           return true;
         } else if (cell.type === 'core') {
-          // v — only 'v' kills the enemy
           if (b.ch.toLowerCase() === CORE_CHAR) {
             enemy.alive = false;
             score += 100;
           }
-          // whether matched or not, bullet is blocked
           return true;
         } else {
-          // letter — only matching char destroys it
+          // char cell
           if (b.ch.toLowerCase() === cell.ch.toLowerCase()) {
             cell.alive = false;
             score += 10;
           }
-          return true; // bullet always consumed on hit
+          return true;
         }
       }
     }
@@ -247,52 +310,36 @@ function tick() {
   const fieldTop = HUD_TOP + 1;
   const fieldBot = H - HUD_BOT - 1;
 
-  // Move bullets upward
-  const kept = [];
-  for (const b of bullets) {
-    b.y--;
-    if (b.y < fieldTop) continue;
-    if (!hitTest(b)) kept.push(b);
-  }
-  bullets = kept;
+  // Move bullets
+  bullets = bullets.filter(b => { b.y--; return b.y >= fieldTop && !hitTest(b); });
 
-  // Move enemies horizontally every H_MOVE_FRAMES
+  // Move enemies horizontally
   if (frame % H_MOVE_FRAMES === 0) {
-    // Determine wall hit
     let hitWall = false;
     for (const enemy of enemies) {
       if (!enemy.alive) continue;
-      const leftX  = enemy.x;
-      const rightX = enemy.x + (ENEMY_COLS - 1) * CELL_GAP;
-      if (invDir === 1  && rightX + 1 >= W) hitWall = true;
-      if (invDir === -1 && leftX  - 1 <  1) hitWall = true;
+      const rightX = enemy.x + (enemy.cols - 1) * CELL_GAP;
+      if (invDir ===  1 && rightX + 1 >= W) hitWall = true;
+      if (invDir === -1 && enemy.x  - 1 <  1) hitWall = true;
     }
 
     if (hitWall) {
-      // Drop down and reverse
       invDir *= -1;
-      for (const enemy of enemies) {
-        if (!enemy.alive) continue;
-        enemy.y += V_DROP_ROWS;
-      }
+      for (const enemy of enemies) { if (enemy.alive) enemy.y++; }
     } else {
-      for (const enemy of enemies) {
-        if (!enemy.alive) continue;
-        enemy.x += invDir;
-      }
+      for (const enemy of enemies) { if (enemy.alive) enemy.x += invDir; }
     }
 
-    // Game over check: enemy cell reaches player's row or below
+    // Game over: enemy reaches player area
     for (const enemy of enemies) {
       if (!enemy.alive) continue;
-      for (let r = 0; r < ENEMY_ROWS; r++) {
-        for (let c = 0; c < ENEMY_COLS; c++) {
-          if (!enemy.cells[r][c].alive) continue;
-          if (enemy.y + r >= fieldBot) {
-            gameOver    = true;
-            gameOverMsg = '💀  GAME OVER  💀';
-            return;
-          }
+      for (let r = 0; r < enemy.rows; r++) {
+        const row = enemy.cells[r];
+        if (!row) continue;
+        if (row.some(c => c && c.alive) && enemy.y + r >= fieldBot) {
+          gameOver    = true;
+          gameOverMsg = '💀  GAME OVER  💀';
+          return;
         }
       }
     }
@@ -314,10 +361,7 @@ function handleInput(data) {
   const fieldTop = HUD_TOP + 1;
   const fieldBot = H - HUD_BOT - 1;
 
-  if (gameOver) {
-    if (data === 'q') cleanup();
-    return;
-  }
+  if (gameOver) { if (data === 'q') cleanup(); return; }
 
   if (mode === 'NORMAL') {
     switch (data) {
@@ -352,6 +396,14 @@ function cleanup() {
 }
 
 function start() {
+  designs = loadDesigns(ENEMIES_DIR);
+  if (designs.length === 0) {
+    process.stderr.write(`[VimVader] No enemy designs found in: ${ENEMIES_DIR}\n`);
+    process.stderr.write(`           Add .enemy files there to get started.\n`);
+  } else {
+    process.stderr.write(`[VimVader] Loaded ${designs.length} enemy design(s): ${designs.map(d => d.name).join(', ')}\n`);
+  }
+
   process.stdin.setRawMode(true);
   process.stdin.resume();
   process.stdin.setEncoding('utf8');
@@ -363,14 +415,11 @@ function start() {
   });
   process.stdout.write(ansi.hideCursor() + ansi.clear());
   initGame();
+
   let last = Date.now();
   loopTimer = setInterval(() => {
     const now = Date.now();
-    if (now - last >= FRAME_MS) {
-      tick();
-      render();
-      last = now;
-    }
+    if (now - last >= FRAME_MS) { tick(); render(); last = now; }
   }, Math.floor(FRAME_MS / 2));
   process.on('SIGINT', cleanup);
 }
