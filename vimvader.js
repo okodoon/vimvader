@@ -115,8 +115,19 @@ let invDir   = 1;
 let enemies  = [];
 let bullets  = [];
 let player   = { x: 40, y: 20 };
-let lastShot = '';
-let cmdBuf   = '';   // コマンドラインバッファ（:q 入力用）
+let lastShot     = '';
+let cmdBuf       = '';   // コマンドラインバッファ（:q 入力用）
+let visualAnchor = null; // { x, y } — Ctrl+V で矩形選択の基点
+
+function getSelectionRect() {
+  if (!visualAnchor) return null;
+  return {
+    x1: Math.min(player.x, visualAnchor.x),
+    y1: Math.min(player.y, visualAnchor.y),
+    x2: Math.max(player.x, visualAnchor.x),
+    y2: Math.max(player.y, visualAnchor.y),
+  };
+}
 
 function getSize() {
   return { W: process.stdout.columns || 80, H: process.stdout.rows || 24 };
@@ -181,8 +192,9 @@ function initGame() {
   mode     = 'NORMAL';
   gameOver = false;
   gameOverMsg = '';
-  lastShot = '';
-  cmdBuf   = '';
+  lastShot     = '';
+  cmdBuf       = '';
+  visualAnchor = null;
   spawnWave();
 }
 
@@ -195,9 +207,11 @@ function render() {
   buf.push(ansi.home());
 
   // Top HUD
-  const modeStr = mode === 'NORMAL'
-    ? ansi.bold(ansi.color('36', '[NORMAL]'))
-    : ansi.bold(ansi.color('35', '[INSERT]'));
+  let modeStr;
+  if      (mode === 'VISUAL')                    modeStr = ansi.bold(ansi.color('32', '[VISUAL]'));
+  else if (mode === 'INSERT' && visualAnchor)    modeStr = ansi.bold(ansi.color('35', '[V-INSERT]'));
+  else if (mode === 'INSERT')                    modeStr = ansi.bold(ansi.color('35', '[INSERT]'));
+  else                                           modeStr = ansi.bold(ansi.color('36', '[NORMAL]'));
   const hudL   = `VIMVADER  Score: ${String(score).padStart(6)}`;
   const gapLen = Math.max(1, W - hudL.length - 12);
   buf.push(
@@ -213,6 +227,27 @@ function render() {
   const fieldBot = H - HUD_BOT - 1;
   for (let r = fieldTop; r <= fieldBot; r++) {
     buf.push(ansi.moveTo(r, 1) + ' '.repeat(W));
+  }
+
+  // ── Visual selection highlight
+  const selRect = (mode === 'VISUAL' || (mode === 'INSERT' && visualAnchor))
+    ? getSelectionRect() : null;
+  if (selRect) {
+    for (let r = selRect.y1; r <= selRect.y2; r++) {
+      for (let x = selRect.x1; x <= selRect.x2; x++) {
+        if (r >= fieldTop && r <= fieldBot && x >= 1 && x <= W) {
+          buf.push(ansi.moveTo(r, x) + '\x1b[44m·\x1b[0m');
+        }
+      }
+    }
+    // アンカー角を表示
+    buf.push(ansi.moveTo(visualAnchor.y, visualAnchor.x) + ansi.bold(ansi.color('32', '+')));
+    // 選択サイズ表示
+    const selW = selRect.x2 - selRect.x1 + 1;
+    const selH = selRect.y2 - selRect.y1 + 1;
+    const sizeStr = ` ${selW}×${selH} `;
+    buf.push(ansi.moveTo(selRect.y1, Math.min(selRect.x2 + 2, W - sizeStr.length)) +
+             ansi.color('32', sizeStr));
   }
 
   // Enemies
@@ -249,10 +284,14 @@ function render() {
   // Bottom HUD
   let help;
   if (cmdBuf !== '') {
-    // コマンドラインモード表示（Vimっぽく下部に）
     help = cmdBuf + '█';
   } else if (mode === 'NORMAL') {
-    help = 'h/j/k/l: Move  i: Insert  :q: Quit';
+    help = 'h/j/k/l: Move  i: Insert  ^V: Visual  :q: Quit';
+  } else if (mode === 'VISUAL') {
+    help = 'h/j/k/l: 選択拡張  i: V-INSERT（射出）  ESC: キャンセル';
+  } else if (mode === 'INSERT' && visualAnchor) {
+    const r = getSelectionRect();
+    help = `矩形 ${r.x2-r.x1+1}×${r.y2-r.y1+1} — Type: 一斉射出  ESC: 解除`;
   } else {
     help = `Type to shoot${lastShot ? `  last:'${lastShot}'` : ''}  ESC: Normal`;
   }
@@ -401,13 +440,49 @@ function handleInput(data) {
       case 'k': player.y = Math.max(fieldTop, player.y - 1); break;
       case 'j': player.y = Math.min(fieldBot, player.y + 1); break;
       case 'i': mode = 'INSERT'; break;
-      case ':': cmdBuf = ':'; break;  // コマンドモード開始
+      case ':': cmdBuf = ':'; break;
+      case '\x16':  // Ctrl+V → 矩形選択開始
+        visualAnchor = { x: player.x, y: player.y };
+        mode = 'VISUAL';
+        break;
     }
+
+  } else if (mode === 'VISUAL') {
+    switch (data) {
+      case 'h': player.x = Math.max(1,        player.x - 1); break;
+      case 'l': player.x = Math.min(W,        player.x + 1); break;
+      case 'k': player.y = Math.max(fieldTop, player.y - 1); break;
+      case 'j': player.y = Math.min(fieldBot, player.y + 1); break;
+      case 'i':
+        // 選択を確定してV-INSERTへ（アンカーはそのまま保持）
+        mode = 'INSERT';
+        break;
+      case '\x1b':
+        // キャンセル
+        visualAnchor = null;
+        mode = 'NORMAL';
+        break;
+      case ':': cmdBuf = ':'; break;
+    }
+
   } else {
+    // INSERT mode
     if (data === '\x1b') {
+      visualAnchor = null;
       mode = 'NORMAL';
     } else if (data.length === 1 && data >= ' ' && data <= '~') {
-      bullets.push({ x: player.x, y: player.y - 1, ch: data });
+      if (visualAnchor) {
+        // 矩形選択が有効 → 選択範囲の全座標から一斉射出
+        const rect = getSelectionRect();
+        for (let y = rect.y1; y <= rect.y2; y++) {
+          for (let x = rect.x1; x <= rect.x2; x++) {
+            bullets.push({ x, y: y - 1, ch: data });
+          }
+        }
+      } else {
+        // 通常の単発射出
+        bullets.push({ x: player.x, y: player.y - 1, ch: data });
+      }
       lastShot = data;
     }
   }
